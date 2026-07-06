@@ -1,0 +1,20 @@
+{
+  "feature_names": [
+    "working_capital_to_total_assets",
+    "retained_earnings_to_total_assets",
+    "roa_net_income_to_total_assets",
+    "current_ratio",
+    "quick_ratio",
+    "debt_ratio_tl_to_ta",
+    "net_worth_to_total_assets",
+    "interest_coverage_ebit_to_interest",
+    "debt_to_equity",
+    "operating_margin"
+  ],
+  "n_training_rows": 5114,
+  "n_test_rows": 1705,
+  "positive_class_rate": 0.03226279513125092,
+  "dataset_source": "UCI Taiwanese Bankruptcy Prediction (id=572), Taiwan Economic Journal 1999-2009",
+  "logreg_test_auc": 0.922633608815427,
+  "gb_test_auc": 0.9301432506887053
+}

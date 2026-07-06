@@ -57,6 +57,9 @@ st.markdown(f"""
   .stApp {{ background-color: {COLORS['bg']}; color: {COLORS['text']}; }}
   h1, h2, h3 {{ font-family: 'Newsreader', serif !important; font-weight: 600 !important; color: {COLORS['text']}; }}
   [data-testid="stSidebar"] {{ background-color: {COLORS['panel']}; border-right: 1px solid {COLORS['panel_border']}; }}
+  [data-testid="collapsedControl"] {{ display: none !important; }}
+  [data-testid="stSidebarCollapseButton"] {{ display: none !important; }}
+  button[kind="header"] {{ display: none !important; }}
   .metric-card {{
       background-color: {COLORS['panel']}; border: 1px solid {COLORS['panel_border']};
       border-left: 4px solid var(--zone-color, {COLORS['accent']});
@@ -155,6 +158,83 @@ def predict_ml_distress(annual_inputs: pd.DataFrame):
     return results
 
 
+def build_plain_summary(ratios, ml_results, company_name):
+    """
+    Rule-based (not AI-generated — no LLM API in this build) plain-English
+    synthesis of the Z''-Score, O-Score, ML distress model, liquidity and
+    leverage into a short, simple takeaway.
+    """
+    latest_year = ratios["latest_year"]
+    zpp = ratios["zpp"][latest_year]
+    liq_val = ratios["liq"]["current_ratio"]["value"]
+    de_val = ratios["lev"]["debt_to_equity"]["value"]
+    o_years = list(ratios["o"].keys())
+    o_latest = ratios["o"][o_years[-1]] if o_years else None
+
+    signals = []  # (severity: 0=good,1=watch,2=bad, sentence)
+
+    if zpp["score"] is not None:
+        if zpp["zone"] == "Safe":
+            signals.append((0, f"its Altman Z''-Score of {zpp['score']:.2f} sits in the safe zone"))
+        elif zpp["zone"] == "Grey":
+            signals.append((1, f"its Altman Z''-Score of {zpp['score']:.2f} sits in the grey zone — not "
+                                f"distressed, but not fully safe either"))
+        else:
+            signals.append((2, f"its Altman Z''-Score of {zpp['score']:.2f} falls in the distress zone"))
+
+    if o_latest and o_latest.get("probability") is not None:
+        p = o_latest["probability"] * 100
+        if p < 20:
+            signals.append((0, f"the Ohlson model estimates a low {p:.0f}% distress probability"))
+        elif p < 50:
+            signals.append((1, f"the Ohlson model flags an elevated {p:.0f}% distress probability"))
+        else:
+            signals.append((2, f"the Ohlson model estimates a high {p:.0f}% distress probability"))
+
+    if ml_results:
+        latest_ml_year = max(ml_results.keys())
+        p = ml_results[latest_ml_year]["probability"] * 100
+        if p < 20:
+            signals.append((0, f"the ML model estimates a low {p:.0f}% distress probability"))
+        elif p < 50:
+            signals.append((1, f"the ML model flags an elevated {p:.0f}% distress probability"))
+        else:
+            signals.append((2, f"the ML model estimates a high {p:.0f}% distress probability"))
+
+    liq_note = None
+    if liq_val is not None:
+        if liq_val < 1:
+            liq_note = f"current ratio of {liq_val:.2f} is below 1, meaning short-term liabilities exceed short-term assets"
+        elif liq_val <= 2:
+            liq_note = f"current ratio of {liq_val:.2f} is within a healthy range"
+        else:
+            liq_note = f"current ratio of {liq_val:.2f} indicates a strong liquidity buffer"
+
+    lev_note = None
+    if de_val is not None:
+        if de_val < 0.5:
+            lev_note = f"debt/equity of {de_val:.2f} reflects conservative leverage"
+        elif de_val <= 1.5:
+            lev_note = f"debt/equity of {de_val:.2f} reflects moderate leverage"
+        else:
+            lev_note = f"debt/equity of {de_val:.2f} reflects high leverage"
+
+    worst = max((s[0] for s in signals), default=0)
+    verdict = {0: "Overall, this looks financially healthy with low near-term risk.",
+               1: "Overall, this looks stable but has a few areas worth monitoring.",
+               2: "Overall, this shows meaningful signs of financial distress risk."}[worst]
+
+    sentence_parts = [s[1] for s in signals]
+    lead = f"{company_name}: " + "; ".join(sentence_parts) + "." if sentence_parts else f"{company_name}: limited data available."
+    detail = " ".join(filter(None, [
+        f"Its {liq_note}," if liq_note else "", f"and {lev_note}." if lev_note else ""
+    ])).strip()
+    if detail and not detail.endswith("."):
+        detail += "."
+
+    return lead, detail, verdict
+
+
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
@@ -184,7 +264,6 @@ if not ML_AVAILABLE:
 # ---------------------------------------------------------------------------
 
 st.title("Credit Risk & Distress Prediction Platform")
-st.caption("Analytical / educational tool — not validated for real lending or investment decisions.")
 
 if not main_ticker:
     st.info("Enter a ticker in the sidebar and click Analyze to begin.")
@@ -218,6 +297,9 @@ if analyze or "last_ticker" in st.session_state:
             for w in financials.warnings:
                 st.warning(w)
 
+    # ML results computed once here so both the Overview summary and the ML tab can use them
+    ml_results_all = predict_ml_distress(annual_inputs) if ML_AVAILABLE else None
+
     tab_overview, tab_ratios, tab_ml, tab_peers, tab_methodology = st.tabs(
         ["Overview", "Credit Ratios", "ML Distress Model", "Peer Comparison", "Methodology"]
     )
@@ -226,6 +308,17 @@ if analyze or "last_ticker" in st.session_state:
     # OVERVIEW TAB
     # =======================================================================
     with tab_overview:
+        lead, detail, verdict = build_plain_summary(ratios, ml_results_all, financials.company_name)
+        verdict_color = COLORS["safe"] if "healthy" in verdict else (
+            COLORS["distress"] if "distress risk" in verdict else COLORS["grey"])
+        st.markdown(f"""
+        <div class="metric-card" style="--zone-color:{verdict_color}; margin-bottom:20px;">
+            <div class="metric-label">Quick Take</div>
+            <div style="font-size:1.05rem; margin-top:6px; line-height:1.5;">{lead} {detail}</div>
+            <div style="font-size:1.0rem; margin-top:8px; font-weight:600; color:{verdict_color}">{verdict}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
         zpp_latest = ratios["zpp"][latest_year]
         o_latest = ratios["o"].get(years[-1]) if len(years) > 1 else None
 
@@ -344,7 +437,7 @@ if analyze or "last_ticker" in st.session_state:
             st.info("ML model artifacts not found. Run `python -m models.ml_distress.train` "
                      "locally once, then reload this app.")
         else:
-            ml_results = predict_ml_distress(annual_inputs)
+            ml_results = ml_results_all
             if not ml_results:
                 st.warning("Could not compute the ML distress score for this company "
                            "(insufficient underlying data).")
